@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from langchain_experimental.agents import create_pandas_dataframe_agent
 
 from excel_utils import read_excel_file
+from tools import filter_data, aggregate_data, pivot_table
 
 
 def load_openai_api():
@@ -37,10 +38,11 @@ def create_excel_agent(file_path: str, model_name: str = "gpt-4") -> Union[None,
         agent = create_pandas_dataframe_agent(
             llm=llm,
             df=all_dataframes,
-            verbose=False,
+            verbose=True,
             agent_type="openai-tools",
             return_intermediate_steps=False,
-            allow_dangerous_code=True
+            allow_dangerous_code=True,
+            tools=[filter_data, aggregate_data, pivot_table]
         )
         return agent
 
@@ -70,14 +72,3 @@ def run_interactive_chat(agent):
             break
         except Exception as e:
             print(f"⚠️ Error: {e}\n")
-
-
-if __name__ == "__main__":
-    file_path = "C:\\Users\\aravi\\Downloads\\Assignments\\W6D1\\excel-agent\\sales_data.xlsx"
-
-    agent = create_excel_agent(file_path)
-
-    if agent is not None:
-        run_interactive_chat(agent)
-    else:
-        print("❌ Failed to create agent. Check for errors above.")
