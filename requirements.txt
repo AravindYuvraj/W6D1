@@ -1,0 +1,12 @@
+pandas
+openpyxl
+streamlit
+langchain
+openai
+tiktoken
+fuzzywuzzy
+python-dotenv
+rapidfuzz
+filetype
+tabulate
+langchain-experimental
