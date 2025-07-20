@@ -1,57 +1,51 @@
 # excel_utils.py
 
 import pandas as pd
-from typing import Dict, Tuple
-import os
+from typing import Dict
+from rapidfuzz import fuzz
+
+# Synonym dictionary
+COLUMN_SYNONYMS = {
+    "amt": "amount",
+    "revenue_amt": "revenue",
+    "qty": "quantity",
+    "product_id": "product",
+    "cust id": "customer_id",
+    "customerid": "customer_id",
+    "rev": "revenue",
+    "reg" : "region"
+}
+
+def normalize_column_name(name: str) -> str:
+    name = name.lower().strip().replace("-", "_").replace(" ", "_")
+
+    # Replace synonyms
+    for key, val in COLUMN_SYNONYMS.items():
+        if fuzz.ratio(name, key) > 85:
+            return val
+
+    return name
+
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [normalize_column_name(col) for col in df.columns]
+    return df
+
 
 def read_excel_file(file_path: str) -> Dict[str, pd.DataFrame]:
-    """
-    Reads an Excel file with multiple sheets.
-    
-    Returns:
-        A dictionary where keys are sheet names and values are DataFrames.
-    """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    try:
-        excel_data = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
-    except Exception as e:
-        raise RuntimeError(f"Error reading Excel file: {e}")
-
-    return excel_data
+    xls = pd.ExcelFile(file_path)
+    sheets = {}
+    for sheet_name in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name)
+        sheets[sheet_name] = clean_dataframe(df)
+    return sheets
 
 
-def preview_excel_sheets(dataframes: Dict[str, pd.DataFrame], rows: int = 5) -> str:
-    """
-    Creates a markdown-style preview of the first few rows from each sheet.
-    Useful for feeding into an LLM prompt or displaying in UI.
-
-    Args:
-        dataframes: Dict of {sheet_name: DataFrame}
-        rows: Number of rows to preview
-
-    Returns:
-        A string with markdown tables
-    """
-    previews = []
-    for sheet_name, df in dataframes.items():
-        preview_str = f"### Sheet: {sheet_name}\n"
-        if df.empty:
-            preview_str += "_(Empty sheet)_\n"
-        else:
-            preview_str += df.head(rows).to_markdown(index=False) + "\n"
-        previews.append(preview_str)
-
-    return "\n\n".join(previews)
-
-
-def get_sheet_names(file_path: str) -> list:
-    """
-    Return sheet names in the Excel file.
-    """
-    try:
-        xls = pd.ExcelFile(file_path, engine='openpyxl')
-        return xls.sheet_names
-    except Exception as e:
-        raise RuntimeError(f"Unable to get sheet names: {e}")
+def preview_excel_sheets(sheets: Dict[str, pd.DataFrame], rows: int = 5) -> str:
+    preview = ""
+    for name, df in sheets.items():
+        preview += f"### Sheet: {name}\n"
+        preview += df.head(rows).to_markdown(index=False)
+        preview += "\n\n"
+    return preview
