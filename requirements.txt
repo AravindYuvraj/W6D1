@@ -10,3 +10,5 @@ rapidfuzz
 filetype
 tabulate
 langchain-experimental
+langchain-community
+rapidfuzz
