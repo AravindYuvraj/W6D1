@@ -7,6 +7,7 @@ import re
 import json
 from dotenv import load_dotenv
 import os
+from thefuzz import process # New import for fuzzy matching
 
 # --- Load environment variables from .env file ---
 load_dotenv()
@@ -19,9 +20,9 @@ st.set_page_config(
 )
 
 # --- Header ---
-st.title("🤖 Intelligent Excel Agent (Final Analyst Edition)")
+st.title("🤖 Intelligent Excel Agent (Street-Smart Edition)")
 st.write("""
-This version uses a robust agent creation method to solve previous errors.
+I can now understand fuzzy column names like "sales amount" instead of `revenue`!
 Upload your Excel file, provide your Google API key, and ask me to analyze your data.
 """)
 
@@ -31,6 +32,9 @@ class ExcelDataFrame:
         self.file_path = file_path
         try:
             self.dataframes = pd.read_excel(file_path, sheet_name=None)
+            # Store original column names for fuzzy matching later
+            self.original_columns = {sheet: df.columns.tolist() for sheet, df in self.dataframes.items()}
+            
             for sheet_name, df in self.dataframes.items():
                 df.columns = [self._clean_col_names(col) for col in df.columns]
                 self.dataframes[sheet_name] = df
@@ -51,9 +55,13 @@ class ExcelDataFrame:
         if df.empty:
             return f"Sheet: '{sheet_name}' is empty."
         
-        schema = f"Sheet: '{sheet_name}'\nColumns:\n"
+        schema = f"Sheet: '{sheet_name}'\nCleaned Columns:\n"
         for col, dtype in df.dtypes.items():
             schema += f"- {col}: {dtype}\n"
+        
+        schema += "\nOriginal Columns:\n"
+        for col in self.original_columns.get(sheet_name, []):
+             schema += f"- {col}\n"
         return schema
 
     def get_dataframe(self, sheet_name: str) -> pd.DataFrame:
@@ -82,7 +90,7 @@ if uploaded_file and google_api_key:
         with st.spinner("Initializing Agent... Please wait."):
             try:
                 excel_db = ExcelDataFrame(uploaded_file)
-                llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=google_api_key, temperature=0)
+                llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=google_api_key, temperature=0)
 
                 def analyze_sheet(tool_input: str) -> str:
                     try:
@@ -93,28 +101,20 @@ if uploaded_file and google_api_key:
                         sheet_name = input_data["sheet_name"]
                         query = input_data["query"]
 
-                        st.write(f"🔍 Analyzing sheet: **{sheet_name}**...")
+                        st.write(f"🔍 Analyzing sheet: **{sheet_name}** with query: \"{query}\"")
                         
                         df = excel_db.get_dataframe(sheet_name)
                         if df.empty:
                             return f"The sheet '{sheet_name}' is empty and cannot be analyzed."
 
-                        # --- FIX: Added a more forceful prefix to prevent hallucination ---
+                        # --- FIX: Make the specialist agent's prompt extremely direct ---
                         specialist_prefix = """
-                        You are working with a pandas dataframe in Python. The name of the dataframe is `df`.
-                        You must use the tools below to answer the question.
-                        
-                        CRITICAL INSTRUCTION: After you get a result from a tool in the "Observation" step,
-                        you MUST use that exact result to form your "Final Answer".
-                        Do not make up a new number or value. Your Final Answer must be based directly on the Observation.
-                        
-                        Example:
-                        ...
-                        Action: python_repl_ast
-                        Action Input: print(df['revenue'].sum())
-                        Observation: 3246095
-                        Thought: I now know the final answer.
-                        Final Answer: The total revenue is 3246095.
+                        You are a Python code executor.
+                        You are working with a pandas dataframe in Python named `df`.
+                        Your task is to write and execute a single line of Python code to answer the user's query.
+                        You MUST output only the raw result of the code execution.
+                        Do not add any conversational text, explanations, or thoughts.
+                        Just return the direct output from the python_repl_ast tool.
                         """
 
                         specialist_agent_executor = create_pandas_dataframe_agent(
@@ -127,16 +127,33 @@ if uploaded_file and google_api_key:
                         )
                         
                         result = specialist_agent_executor.invoke({"input": query})
-                        return result["output"]
+                        # The specialist now returns the raw result, so the manager must add the conversational text.
+                        return f"The result of the analysis is: {result['output']}"
 
-                    except json.JSONDecodeError:
-                        return "Error: The input for the analyze_sheet tool was not valid JSON. Please provide a valid JSON string with 'sheet_name' and 'query' keys."
                     except Exception as e:
                         return f"An error occurred during analysis: {e}"
 
                 def list_sheets_tool(ignored_input=""):
-                    """A wrapper for the list_sheets method that ignores any input."""
                     return excel_db.list_sheets()
+
+                def get_column_name_match(tool_input: str) -> str:
+                    try:
+                        input_data = json.loads(tool_input)
+                        sheet_name = input_data["sheet_name"]
+                        column_name = input_data["column_name"]
+
+                        actual_columns = excel_db.original_columns.get(sheet_name)
+                        if not actual_columns:
+                            return f"Error: Could not find columns for sheet '{sheet_name}'."
+
+                        best_match, score = process.extractOne(column_name, actual_columns)
+                        if score > 80: # Confidence threshold
+                            return excel_db._clean_col_names(best_match)
+                        else:
+                            return f"Error: Could not find a confident match for column '{column_name}' in sheet '{sheet_name}'. Best guess was '{best_match}'."
+                    except Exception as e:
+                        return f"An error occurred during column matching: {e}"
+
 
                 tools = [
                     Tool(
@@ -150,27 +167,39 @@ if uploaded_file and google_api_key:
                         description="Use this tool to get the schema (column names and data types) of a specific sheet. Pass the sheet name as an argument.",
                     ),
                     Tool(
+                        name="get_column_name_match",
+                        func=get_column_name_match,
+                        description="Use this tool to find the correct, cleaned column name that matches a user's fuzzy column name. Input must be a JSON with 'sheet_name' and 'column_name'."
+                    ),
+                    Tool(
                         name="analyze_sheet",
                         func=analyze_sheet,
-                        description="Use this tool to perform detailed analysis, filtering, or calculations on a specific sheet. The input must be a JSON string with 'sheet_name' and 'query' keys."
+                        description="Use this tool to perform detailed analysis on a specific sheet, AFTER you have confirmed all column names are correct. Input must be a JSON with 'sheet_name' and 'query'."
                     )
                 ]
                 
                 system_message = """
                 You are a helpful and friendly "Manager" agent for an Excel file.
-                Your primary goal is to delegate tasks to the correct tool based on the user's query.
+                Your primary goal is to understand a user's query and delegate tasks to the correct tools.
 
                 **Your Workflow:**
-                1.  **Analyze the User's Request:** Carefully read the user's question to understand their intent.
-                2.  **Select the Right Tool:**
-                    * For general questions about the file's structure, like "What sheets are in this file?" or "How many tables are there?", use the `list_sheets` tool.
-                    * To understand the columns of a specific sheet, use `get_sheet_schema`.
-                    * For any question that requires looking at the data (e.g., filtering, calculating, finding totals, asking 'how many', 'what is the total', etc.), you **MUST** use the `analyze_sheet` tool.
-                3.  **Synthesize the Final Answer:** After using a tool, you must provide a clear, final answer. For example, if the user asks "how many tables are there?", and the `list_sheets` tool returns `['Sales', 'Customers', 'Product Info']`, your final answer must be "There are 3 tables." You must count the items in the list.
-                4.  **Format the `analyze_sheet` Input:** When using `analyze_sheet`, your input **must** be a valid JSON object with two keys: "sheet_name" and "query".
-                For example, if the user asks "What is the total revenue in the Sales sheet?", you must call the `analyze_sheet` tool and your Action Input would be a JSON object where the `sheet_name` key is "Sales" and the `query` key is "What is the total revenue?".
 
-                **Crucial Rule:** Do **NOT** attempt to answer data-related questions yourself. Your only job is to call the correct tool and then provide a final answer based on the tool's observation.
+                1.  **Understand the Goal:** Analyze the user's question to determine what they want to achieve.
+
+                2.  **Identify Sheets and Columns:**
+                    * If you don't know which sheet to use, call `list_sheets`.
+                    * If the user's query mentions column names (e.g., "sales amount", "Customer ID"), you **MUST** translate them to the correct column names before analyzing the data.
+
+                3.  **Translate Column Names (if necessary):**
+                    * For each fuzzy column name in the user's query, use the `get_column_name_match` tool.
+                    * **Example:** If the user asks "What is the total sales amount?", you must first call `get_column_name_match`. Your Action Input for this tool should be a JSON object with the `sheet_name` key set to "Sales" and the `column_name` key set to "sales amount". The tool will return the correct name, e.g., `revenue`.
+
+                4.  **Analyze the Data:**
+                    * Once you have the correct sheet name and all column names have been translated, construct a new query using the *correct* column names.
+                    * Call the `analyze_sheet` tool with the corrected query.
+                    * **Example:** After translating "sales amount" to `revenue`, you call `analyze_sheet`. Your Action Input for this tool should be a JSON object with the `sheet_name` key set to "Sales" and the `query` key set to "What is the total revenue?".
+
+                **Crucial Rule:** Never call `analyze_sheet` with a user's raw query if it contains column names. Always translate column names first using `get_column_name_match`.
                 """
                 
                 agent_kwargs = {
@@ -187,9 +216,9 @@ if uploaded_file and google_api_key:
                 )
                 
                 st.session_state.agent_executor = manager_agent_executor
-                st.sidebar.success("Analyst Agent Initialized!")
+                st.sidebar.success("Street-Smart Agent Initialized!")
                 if not st.session_state.messages:
-                    st.session_state.messages.append({"role": "assistant", "content": "Hello! I'm ready to analyze your Excel file. What would you like to know?"})
+                    st.session_state.messages.append({"role": "assistant", "content": "Hello! I can now understand fuzzy column names. What would you like to know?"})
 
             except Exception as e:
                 st.sidebar.error(f"Initialization failed: {e}")

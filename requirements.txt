@@ -13,3 +13,5 @@ tabulate
 langchain-experimental
 langchain-community
 langchain-google-genai
+thefuzz 
+python-Levenshtein
